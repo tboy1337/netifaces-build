@@ -1,0 +1,119 @@
+name: Build Netifaces Windows Wheels
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      netifaces_version:
+        description: 'Netifaces version to build (leave empty for latest)'
+        required: false
+  schedule:
+    - cron: '0 0 * * 0'  # Run weekly on Sunday at midnight UTC
+permissions:
+  contents: write
+
+jobs:
+  build_wheels:
+    name: Build wheels on Windows
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ['3.7', '3.8', '3.9', '3.10', '3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests
+
+      - name: Get netifaces version
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.netifaces_version }}" ]; then
+            echo "NETIFACES_VERSION=${{ github.event.inputs.netifaces_version }}" >> $GITHUB_ENV
+            echo "Using manually specified version: ${{ github.event.inputs.netifaces_version }}"
+          else
+            # Create version file
+            python scripts/get_netifaces_version.py --output-file version.txt --retries 5
+            LATEST_VERSION=$(cat version.txt)
+            echo "NETIFACES_VERSION=$LATEST_VERSION" >> $GITHUB_ENV
+            echo "Using latest version from PyPI: $LATEST_VERSION"
+          fi
+        shell: bash
+
+      - name: Build netifaces wheel
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Building netifaces $env:NETIFACES_VERSION for Python ${{ matrix.python-version }}"
+          if (-not (Test-Path -Path "dist")) {
+            New-Item -Path "dist" -ItemType Directory
+          }
+          python scripts/build_wheel.py --version $env:NETIFACES_VERSION --output-dir dist
+        shell: pwsh
+
+      - name: Upload wheels as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: netifaces-py${{ matrix.python-version }}-win
+          path: dist/*.whl
+
+  publish_release:
+    name: Create Release with Wheels
+    needs: build_wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install requests
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: wheels
+
+      - name: Get netifaces version for release name
+        id: get_release_version
+        run: |
+          if [ -n "${{ github.event.inputs.netifaces_version }}" ]; then
+            NETIFACES_VERSION="${{ github.event.inputs.netifaces_version }}"
+          else
+            python scripts/get_netifaces_version.py --output-file version.txt --retries 5
+            NETIFACES_VERSION=$(cat version.txt)
+          fi
+          echo "NETIFACES_VERSION=$NETIFACES_VERSION" >> $GITHUB_ENV
+
+      - name: List wheels
+        run: |
+          mkdir -p combined_wheels
+          find wheels -name "*.whl" -exec cp {} combined_wheels/ \;
+          ls -la combined_wheels/
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: combined_wheels/*.whl
+          tag: netifaces-${{ env.NETIFACES_VERSION }}-win-wheels
+          name: Netifaces ${{ env.NETIFACES_VERSION }} Windows Wheels
+          body: |
+            Prebuilt wheels for netifaces ${{ env.NETIFACES_VERSION }} on Windows.
+            
+            These wheels are built automatically using GitHub Actions.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: true 
